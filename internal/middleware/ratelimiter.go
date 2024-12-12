@@ -27,6 +27,25 @@ type (
 	}
 )
 
+func CalculateRequestCount(ctx context.Context, client *db.DiceDB, key string, limit int64) (remaining int64, err error) {
+	val, err := client.Client.Get(ctx, key).Result()
+	if err != nil && !errors.Is(err, dicedb.Nil) {
+		return 0, err
+	}
+
+	// Parse the current request count or initialize to 0
+	var requestCount int64 = 0
+	if val != "" {
+		requestCount, err = strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	return requestCount, nil
+}
+
+
 func NewRateLimiterMiddleware(client *db.DiceDB, limit int64, window float64) (rl *RateLimiterMiddleware) {
 	rl = &RateLimiterMiddleware{
 		client:                client,
@@ -57,29 +76,17 @@ func (rl *RateLimiterMiddleware) Exec(c *gin.Context) {
 	key := fmt.Sprintf("request_count:%d", currentWindow)
 	slog.Debug("Created rate limiter key", slog.Any("key", key))
 
-	// Get the current request count for this window
-	val, err := rl.client.Client.Get(ctx, key).Result()
-	if err != nil && !errors.Is(err, dicedb.Nil) {
-		slog.Error("Error fetching request count", "error", err)
+	requestCount, err := CalculateRequestCount(ctx, rl.client.Client, key)
+	if err != nil {
+		slog.Error("Error converting request count", "error", err)
 		http.Error(c.Writer, "Internal Server Error", http.StatusInternalServerError)
 		return
-	}
-
-	// Parse the current request count or initialize to 0
-	var requestCount int64 = 0
-	if val != "" {
-		requestCount, err = strconv.ParseInt(val, 10, 64)
-		if err != nil {
-			slog.Error("Error converting request count", "error", err)
-			http.Error(c.Writer, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
 	}
 
 	// Check if the request count exceeds the limit
 	if requestCount >= rl.limit {
 		slog.Warn("Request limit exceeded", "count", requestCount)
-		addRateLimitHeaders(c.Writer, rl.limit, rl.limit-(requestCount+1), requestCount+1, currentWindow+int64(rl.window), 0)
+		AddRateLimitHeaders(c.Writer, rl.limit, rl.limit-(requestCount+1), requestCount+1, currentWindow+int64(rl.window), 0)
 		http.Error(c.Writer, "429 - Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
@@ -98,19 +105,19 @@ func (rl *RateLimiterMiddleware) Exec(c *gin.Context) {
 		}
 	}
 
-	secondsDifference, err := calculateNextCleanupTime(ctx, rl.client, rl.cronFrequencyInterval)
+	secondsDifference, err := CalculateNextCleanupTime(ctx, rl.client, rl.cronFrequencyInterval)
 	if err != nil {
 		slog.Error("Error calculating next cleanup time", "error", err)
 	}
 
-	addRateLimitHeaders(c.Writer, rl.limit, rl.limit-(requestCount+1), requestCount+1, currentWindow+int64(rl.window),
+	AddRateLimitHeaders(c.Writer, rl.limit, rl.limit-(requestCount+1), requestCount+1, currentWindow+int64(rl.window),
 		secondsDifference)
 
 	slog.Info("Request processed", "count", requestCount+1)
 	c.Next()
 }
 
-func calculateNextCleanupTime(ctx context.Context, client *db.DiceDB, cronFrequencyInterval time.Duration) (int64, error) {
+func CalculateNextCleanupTime(ctx context.Context, client *db.DiceDB, cronFrequencyInterval time.Duration) (int64, error) {
 	var lastCronCleanupTime int64
 	resp := client.Client.Get(ctx, utils.LastCronCleanupTimeUnixMs)
 	if resp.Err() != nil && !errors.Is(resp.Err(), dicedb.Nil) {
@@ -127,8 +134,7 @@ func calculateNextCleanupTime(ctx context.Context, client *db.DiceDB, cronFreque
 
 	lastCleanupTime := time.UnixMilli(lastCronCleanupTime)
 	nextCleanupTime := lastCleanupTime.Add(cronFrequencyInterval)
-	timeDifference := nextCleanupTime.Sub(time.Now())
-	return int64(timeDifference.Seconds()), nil
+	return int64(time.Until(nextCleanupTime).Seconds()), nil
 }
 
 func MockRateLimiter(client *mock.DiceDBMock, next http.Handler, limit int64, window float64) http.Handler {
@@ -173,7 +179,7 @@ func MockRateLimiter(client *mock.DiceDBMock, next http.Handler, limit int64, wi
 		// Check if the request limit has been exceeded
 		if requestCount >= limit {
 			slog.Warn("Request limit exceeded", "count", requestCount)
-			addRateLimitHeaders(w, limit, limit-(requestCount+1), requestCount+1, currentWindow+int64(window), 0)
+			AddRateLimitHeaders(w, limit, limit-(requestCount+1), requestCount+1, currentWindow+int64(window), 0)
 			http.Error(w, "429 - Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
@@ -194,14 +200,14 @@ func MockRateLimiter(client *mock.DiceDBMock, next http.Handler, limit int64, wi
 			}
 		}
 
-		addRateLimitHeaders(w, limit, limit-(requestCount+1), requestCount+1, currentWindow+int64(window), 0)
+		AddRateLimitHeaders(w, limit, limit-(requestCount+1), requestCount+1, currentWindow+int64(window), 0)
 
 		slog.Info("Request processed", "count", requestCount)
 		next.ServeHTTP(w, r)
 	})
 }
 
-func addRateLimitHeaders(w http.ResponseWriter, limit, remaining, used, resetTime, secondsLeftForCleanup int64) {
+func AddRateLimitHeaders(w http.ResponseWriter, limit, remaining, used, resetTime, secondsLeftForCleanup int64) {
 	w.Header().Set("x-ratelimit-limit", strconv.FormatInt(limit, 10))
 	w.Header().Set("x-ratelimit-remaining", strconv.FormatInt(remaining, 10))
 	w.Header().Set("x-ratelimit-used", strconv.FormatInt(used, 10))

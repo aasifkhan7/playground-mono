@@ -7,8 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
-
+	"server/config"
 	"server/internal/db"
+	"server/internal/middleware"
 	util "server/util"
 
 	"github.com/gin-gonic/gin"
@@ -76,11 +77,36 @@ func (s *HTTPServer) Shutdown() error {
 	if err := s.DiceClient.Client.Close(); err != nil {
 		slog.Error("failed to close dicedb client: %v", slog.Any("err", err))
 	}
-
 	return s.httpServer.Shutdown(context.Background())
 }
 
 func (s *HTTPServer) HealthCheck(w http.ResponseWriter, request *http.Request) {
+	cronFrequencyInterval := config.LoadConfig().Server.CronCleanupFrequency
+	ctx := context.Background()
+	nextCleanup, err := middleware.CalculateNextCleanupTime(ctx, s.DiceClient, cronFrequencyInterval);
+
+	currentWindow := time.Now().Unix() / int64(window)
+	key := fmt.Sprintf("request_count:%d", currentWindow)
+		
+	requestCount, err := middleware.CalculateRequestCount(ctx, s.DiceClient, key)
+	ratelimit := config.LoadConfig().Server.RequestLimitPerMin
+
+	window := config.LoadConfig().Server.RequestWindowSec
+
+	if err != nil {
+		slog.Error("Error converting request count", "error", err)
+		http.Error(c.Writer, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	secondsDifference, err := CalculateNextCleanupTime(ctx, rl.client, rl.cronFrequencyInterval)
+	if err != nil {
+		slog.Error("Error calculating next cleanup time", "error", err)
+	}
+
+	middleware.AddRateLimitHeaders(w, ratelimit, ratelimit-requestCount, requestCount, currentWindow+int64(window),
+		secondsDifference)
+
 	util.JSONResponse(w, http.StatusOK, map[string]string{"message": "server is running"})
 }
 
