@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -85,27 +86,25 @@ func (s *HTTPServer) HealthCheck(w http.ResponseWriter, request *http.Request) {
 	ctx := context.Background()
 	nextCleanup, err := middleware.CalculateNextCleanupTime(ctx, s.DiceClient, cronFrequencyInterval);
 
+	if err != nil {
+		slog.Error("Error calculating next cleanup time", "error", err)
+	}
+
+	window := config.LoadConfig().Server.RequestWindowSec
 	currentWindow := time.Now().Unix() / int64(window)
 	key := fmt.Sprintf("request_count:%d", currentWindow)
 		
 	requestCount, err := middleware.CalculateRequestCount(ctx, s.DiceClient, key)
 	ratelimit := config.LoadConfig().Server.RequestLimitPerMin
 
-	window := config.LoadConfig().Server.RequestWindowSec
-
 	if err != nil {
 		slog.Error("Error converting request count", "error", err)
-		http.Error(c.Writer, "Internal Server Error", http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	secondsDifference, err := CalculateNextCleanupTime(ctx, rl.client, rl.cronFrequencyInterval)
-	if err != nil {
-		slog.Error("Error calculating next cleanup time", "error", err)
-	}
-
 	middleware.AddRateLimitHeaders(w, ratelimit, ratelimit-requestCount, requestCount, currentWindow+int64(window),
-		secondsDifference)
+		nextCleanup)
 
 	util.JSONResponse(w, http.StatusOK, map[string]string{"message": "server is running"})
 }

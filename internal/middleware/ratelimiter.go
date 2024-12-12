@@ -27,7 +27,7 @@ type (
 	}
 )
 
-func CalculateRequestCount(ctx context.Context, client *db.DiceDB, key string, limit int64) (remaining int64, err error) {
+func CalculateRequestCount(ctx context.Context, client *db.DiceDB, key string) (count int64, err error) {
 	val, err := client.Client.Get(ctx, key).Result()
 	if err != nil && !errors.Is(err, dicedb.Nil) {
 		return 0, err
@@ -76,7 +76,7 @@ func (rl *RateLimiterMiddleware) Exec(c *gin.Context) {
 	key := fmt.Sprintf("request_count:%d", currentWindow)
 	slog.Debug("Created rate limiter key", slog.Any("key", key))
 
-	requestCount, err := CalculateRequestCount(ctx, rl.client.Client, key)
+	requestCount, err := CalculateRequestCount(ctx, rl.client, key)
 	if err != nil {
 		slog.Error("Error converting request count", "error", err)
 		http.Error(c.Writer, "Internal Server Error", http.StatusInternalServerError)
